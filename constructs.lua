@@ -1,18 +1,51 @@
-print "testing syntax"
+-- $Id: testes/constructs.lua $
+-- See Copyright Notice in file all.lua
+
+;;print "testing syntax";;
+
+local debug = require "debug"
+
+
+local function checkload (s, msg)
+  assert(string.find(select(2, load(s)), msg))
+end
+
+-- testing semicollons
+do ;;; end
+; do ; a = 3; assert(a == 3) end;
+;
+
+
+-- invalid operations should not raise errors when not executed
+if false then a = 3 // 0; a = 0 % 0 end
+
 
 -- testing priorities
 
 assert(2^3^2 == 2^(3^2));
 assert(2^3*4 == (2^3)*4);
-assert(2^-2 == 1/4 and -2^- -2 == - - -4);
+assert(2.0^-2 == 1/4 and -2^- -2 == - - -4);
 assert(not nil and 2 and not(2>3 or 3<2));
 assert(-3-1-5 == 0+0-9);
 assert(-2^2 == -4 and (-2)^2 == 4 and 2*2-3-1 == 0);
+assert(-3%5 == 2 and -3+5 == 2)
 assert(2*1+3/3 == 3 and 1+2 .. 3*1 == "33");
 assert(not(2+1 > 3*1) and "a".."b" > "a");
 
+assert(0xF0 | 0xCC ~ 0xAA & 0xFD == 0xF4)
+assert(0xFD & 0xAA ~ 0xCC | 0xF0 == 0xF4)
+assert(0xF0 & 0x0F + 1 == 0x10)
+
+assert(3^4//2^3//5 == 2)
+
+assert(-3+4*5//2^3^2//9+4%10/3 == (-3)+(((4*5)//(2^(3^2)))//9)+((4%10)/3))
+
 assert(not ((true or false) and nil))
 assert(      true or false  and nil)
+
+-- old bug
+assert((((1 or false) and true) or false) == true)
+assert((((nil and true) or false) and true) == false)
 
 local a,b = 1,nil;
 assert(-(1 or 2) == -1 and (1 and 2)+(-1.25 or -4) == 0.75);
@@ -25,6 +58,41 @@ x,y=2,1;
 assert((x>y) and x or y == 2);
 
 assert(1234567890 == tonumber('1234567890') and 1234567890+1 == 1234567891)
+
+do   -- testing operators with diffent kinds of constants
+  -- operands to consider:
+  --  * fit in register
+  --  * constant doesn't fit in register
+  --  * floats with integral values
+  local operand = {3, 100, 5.0, -10, -5.0, 10000, -10000}
+  local operator = {"+", "-", "*", "/", "//", "%", "^",
+                    "&", "|", "^", "<<", ">>",
+                    "==", "~=", "<", ">", "<=", ">=",}
+  for _, op in ipairs(operator) do
+    local f = assert(load(string.format([[return function (x,y)
+                return x %s y
+              end]], op)))();
+    for _, o1 in ipairs(operand) do
+      for _, o2 in ipairs(operand) do
+        local gab = f(o1, o2)
+
+        _ENV.XX = o1
+        code = string.format("return XX %s %s", op, o2)
+        res = assert(load(code))()
+        assert(res == gab)
+
+        _ENV.XX = o2
+        local code = string.format("return (%s) %s XX", o1, op)
+        local res = assert(load(code))()
+        assert(res == gab)
+
+        code = string.format("return (%s) %s %s", o1, op, o2)
+        res = assert(load(code))()
+        assert(res == gab)
+      end
+    end
+  end
+end
 
 
 -- silly loops
@@ -142,6 +210,28 @@ assert(a==1 and b==nil)
 
 print'+';
 
+do   -- testing constants
+  local prog <const> = [[local x <XXX> = 10]]
+  checkload(prog, "unknown attribute 'XXX'")
+
+  checkload([[local xxx <const> = 20; xxx = 10]],
+             ":1: attempt to assign to const variable 'xxx'")
+
+  checkload([[
+    local xx;
+    local xxx <const> = 20;
+    local yyy;
+    local function foo ()
+      local abc = xx + yyy + xxx;
+      return function () return function () xxx = yyy end end
+    end
+  ]], ":6: attempt to assign to const variable 'xxx'")
+
+  checkload([[
+    local x <close> = nil
+    x = io.open()
+  ]], ":2: attempt to assign to const variable 'x'")
+end
 
 f = [[
 return function ( a , b , c , d , e )
@@ -150,7 +240,7 @@ return function ( a , b , c , d , e )
 end , { a = 1 , b = 2 >= 1 , } or { 1 };
 ]]
 f = string.gsub(f, "%s+", "\n");   -- force a SETLINE between opcodes
-f,a = loadstring(f)();
+f,a = load(f)();
 assert(a.a == 1 and a.b)
 
 function g (a,b,c,d,e)
@@ -194,47 +284,94 @@ a,b = F(1)~=nil; assert(a == true and b == nil);
 a,b = F(nil)==nil; assert(a == true and b == nil)
 
 ----------------------------------------------------------------
--- creates all combinations of 
--- [not] ([not] arg op [not] (arg op [not] arg ))
--- and tests each one
+------------------------------------------------------------------
 
-function ID(x) return x end
+-- sometimes will be 0, sometimes will not...
+_ENV.GLOB1 = math.random(0, 1)
 
-function f(t, i)
-  local b = t.n
-  local res = math.mod(math.floor(i/c), b)+1
-  c = c*b
-  return t[res]
+-- basic expressions with their respective values
+local basiccases = {
+  {"nil", nil},
+  {"false", false},
+  {"true", true},
+  {"10", 10},
+  {"(0==_ENV.GLOB1)", 0 == _ENV.GLOB1},
+}
+
+local prog
+
+if _ENV.GLOB1 == 0 then
+  basiccases[2][1] = "F"   -- constant false
+
+  prog = [[
+    local F <const> = false
+    if %s then IX = true end
+    return %s
+]]
+else
+  basiccases[4][1] = "k10"   -- constant 10
+
+  prog = [[
+    local k10 <const> = 10
+    if %s then IX = true end
+    return %s
+  ]]
 end
 
-local arg = {" ( 1 < 2 ) ", " ( 1 >= 2 ) ", " F ( ) ", "  nil "; n=4}
+print('testing short-circuit optimizations (' .. _ENV.GLOB1 .. ')')
 
-local op = {" and ", " or ", " == ", " ~= "; n=4}
 
-local neg = {" ", " not "; n=2}
+-- operators with their respective values
+local binops <const> = {
+  {" and ", function (a,b) if not a then return a else return b end end},
+  {" or ", function (a,b) if a then return a else return b end end},
+}
+
+local cases <const> = {}
+
+-- creates all combinations of '(cases[i] op cases[n-i])' plus
+-- 'not(cases[i] op cases[n-i])' (syntax + value)
+local function createcases (n)
+  local res = {}
+  for i = 1, n - 1 do
+    for _, v1 in ipairs(cases[i]) do
+      for _, v2 in ipairs(cases[n - i]) do
+        for _, op in ipairs(binops) do
+            local t = {
+              "(" .. v1[1] .. op[1] .. v2[1] .. ")",
+              op[2](v1[2], v2[2])
+            }
+            res[#res + 1] = t
+            res[#res + 1] = {"not" .. t[1], not t[2]}
+        end
+      end
+    end
+  end
+  return res
+end
+
+-- do not do too many combinations for soft tests
+local level = _soft and 3 or 4
+
+cases[1] = basiccases
+for i = 2, level do cases[i] = createcases(i) end
+print("+")
 
 local i = 0
-repeat
-  c = 1
-  local s = f(neg, i)..'ID('..f(neg, i)..f(arg, i)..f(op, i)..
-            f(neg, i)..'ID('..f(arg, i)..f(op, i)..f(neg, i)..f(arg, i)..'))'
-  local s1 = string.gsub(s, 'ID', '')
-  K,X,NX,WX1,WX2 = nil
-  s = string.format([[
-      local a = %s
-      local b = not %s
-      K = b
-      local xxx; 
-      if %s then X = a  else X = b end
-      if %s then NX = b  else NX = a end
-      while %s do WX1 = a; break end
-      while %s do WX2 = a; break end
-      repeat if (%s) then break end; assert(b)  until not(%s)
-  ]], s1, s, s1, s, s1, s, s1, s, s)
-  assert(loadstring(s))()
-  assert(X and not NX and not WX1 == K and not WX2 == K)
-  if math.mod(i,4000) == 0 then print('+') end
-  i = i+1
-until i==c
+for n = 1, level do
+  for _, v in pairs(cases[n]) do
+    local s = v[1]
+    local p = load(string.format(prog, s, s), "")
+    IX = false
+    assert(p() == v[2] and IX == not not v[2])
+    i = i + 1
+    if i % 60000 == 0 then print('+') end
+  end
+end
+------------------------------------------------------------------
+
+-- testing some syntax errors (chosen through 'gcov')
+checkload("for x do", "expected")
+checkload("x:call", "expected")
 
 print'OK'
